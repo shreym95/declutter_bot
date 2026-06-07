@@ -40,23 +40,25 @@ cp .env.example .env
 ### Run
 
 ```bash
-python stress_bot.py
+python main.py
 ```
 
 ---
 
 ## Architecture
 
-Single-file, no database. State stored in `tasks.json`.
+No database. State stored in `tasks.json` with atomic writes.
 
 ```
-stress_bot.py
-├── Data layer       load/save tasks.json, task CRUD helpers
-├── Gemini layer     persistent chat sessions + one-shot calls for extraction & snooze parsing
-├── Snooze layer     natural language date parsing, run_once scheduling, restart re-registration
-├── Handlers         /start, /help, handle_message (state machine with 30-min expiry flags)
-├── Scheduled jobs   morning_summary, evening_review, snooze_reminder
-└── main()           wire handlers, schedule daily jobs, restore snoozed tasks from disk
+main.py                      entry point — wires handlers, schedules jobs, restores snoozes
+config.py                    env loading, constants, logging setup
+storage.py                   tasks.json I/O, task CRUD, query helpers
+gemini.py                    chat sessions, one-shot extraction & snooze parsing
+jobs.py                      morning_summary, evening_review, snooze_reminder, boot restore
+handlers/
+  commands.py                /start, /help
+  messages.py                handle_message — state machine + all button flows
+  callbacks.py               inline archive button handler
 ```
 
 ### Key design decisions
