@@ -235,6 +235,111 @@ async def ask_gemini(user_id: int, message: str) -> str:
     response = chat.send_message(message)
     return response.text
 
+# ─── SNOOZE LAYER ─────────────────────────────────────────────────────────────
+
+async def parse_snooze_intent(text: str) -> dict:
+    """One-shot Gemini call: extract task name and snooze date from natural language.
+    Returns {"task": "...", "date": "YYYY-MM-DD"} or {"error": "unclear"}."""
+    today = datetime.date.today().isoformat()
+    prompt = (
+        f"Today is {today}.\n"
+        f"The user wants to snooze a task. Their message: \"{text}\"\n\n"
+        f"Extract the task name and the date they want to be reminded.\n"
+        f"Reply ONLY with valid JSON, no markdown, no explanation.\n"
+        f"Format: {{\"task\": \"task name here\", \"date\": \"YYYY-MM-DD\"}}\n"
+        f"If the date or task is unclear, reply: {{\"error\": \"unclear\"}}\n"
+        f"Interpret relative dates: 'tomorrow', 'next Monday', 'in 3 days', etc."
+    )
+    try:
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(max_output_tokens=100)
+        )
+        raw = response.text.strip().strip("```json").strip("```").strip()
+        result = json.loads(raw)
+        if "error" in result or "task" not in result or "date" not in result:
+            return {"error": "unclear"}
+        # Validate date format
+        datetime.date.fromisoformat(result["date"])
+        return result
+    except Exception:
+        return {"error": "unclear"}
+
+async def snooze_reminder(context: ContextTypes.DEFAULT_TYPE):
+    """Job callback: remind user about a snoozed task."""
+    uid = context.job.data["uid"]
+    task_text = context.job.data["task"]
+    try:
+        await context.bot.send_message(
+            uid,
+            f"⏰ *Snooze reminder*\n\nTime to look at: _{task_text}_\n\n"
+            f"What do you want to do with this?",
+            parse_mode="Markdown"
+        )
+        log.info("Snooze reminder sent to user %s for task: %s", uid, task_text)
+    except Exception:
+        log.exception("Snooze reminder failed for user %s", uid)
+
+async def handle_snooze(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int, text: str):
+    """Parse snooze intent, update tasks.json, schedule reminder."""
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    result = await parse_snooze_intent(text)
+
+    if "error" in result:
+        await update.message.reply_text(
+            "I couldn't work out which task or when. Try something like:\n"
+            "_\"Snooze 'finish report' to next Monday\"_ or _\"remind me about groceries tomorrow\"_",
+            parse_mode="Markdown"
+        )
+        return
+
+    task_name = result["task"]
+    snooze_date = result["date"]
+
+    # Find matching task in JSON (fuzzy: task name is a substring)
+    data = load_data()
+    udata = get_user_data(data, uid)
+    matched = None
+    for t in udata["tasks"]:
+        if not t["done"] and not t["archived"] and task_name.lower() in t["text"].lower():
+            matched = t
+            break
+
+    # Schedule reminder at 9 AM IST on the snooze date
+    remind_dt = IST.localize(
+        datetime.datetime.fromisoformat(f"{snooze_date}T09:00:00")
+    )
+    now_aware = datetime.datetime.now(tz=IST)
+
+    if remind_dt <= now_aware:
+        await update.message.reply_text(
+            f"That date ({snooze_date}) is in the past. Try a future date."
+        )
+        return
+
+    if matched:
+        matched["snoozed_until"] = remind_dt.timestamp()
+        save_data(data)
+        log.info("Task snoozed for user %s until %s: %s", uid, snooze_date, matched["text"])
+        display_name = matched["text"]
+    else:
+        # Task not found in JSON — still schedule the reminder, just won't update a record
+        display_name = task_name
+        log.info("Snooze reminder scheduled (task not in JSON) for user %s: %s on %s", uid, task_name, snooze_date)
+
+    context.job_queue.run_once(
+        snooze_reminder,
+        when=remind_dt,
+        data={"uid": uid, "task": display_name},
+        name=f"snooze_{uid}_{display_name[:20]}"
+    )
+
+    await update.message.reply_text(
+        f"⏰ Got it — I'll remind you about *{display_name}* on {snooze_date} at 9 AM.",
+        parse_mode="Markdown"
+    )
+
 # ─── TELEGRAM HANDLERS ────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -252,8 +357,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = ReplyKeyboardMarkup(
         [[KeyboardButton("➡️ What should I do now?"), KeyboardButton("📋 Show my task list")],
-         [KeyboardButton("✅ Mark task done"),         KeyboardButton("🗑 Clear & start fresh")],
-         [KeyboardButton("😮‍💨 I'm overwhelmed")]],
+         [KeyboardButton("✅ Mark task done"),         KeyboardButton("⏰ Snooze a task")],
+         [KeyboardButton("🗑 Clear & start fresh"),   KeyboardButton("😮‍💨 I'm overwhelmed")]],
         resize_keyboard=True
     )
 
@@ -318,6 +423,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             bot_data.pop("awaiting_done", None)
 
+    # Snooze flow
+    snooze_state = bot_data.get("awaiting_snooze")
+    if snooze_state and snooze_state[0] == uid:
+        _, expire_ts = snooze_state
+        if time.time() < expire_ts:
+            bot_data.pop("awaiting_snooze", None)
+            await handle_snooze(update, context, uid, text)
+            return
+        else:
+            bot_data.pop("awaiting_snooze", None)
+
     # ── Button mappings ─────────────────────────────────────────────────────
     button_map = {
         "➡️ What should I do now?": "What is the single most important thing I should do right now? Pick one from my list.",
@@ -342,6 +458,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_data["awaiting_done"] = (uid, expire_ts)
         await update.message.reply_text(
             "Which task did you finish? Type the name (or part of it)."
+        )
+        return
+
+    if text == "⏰ Snooze a task":
+        expire_ts = time.time() + 1800
+        bot_data["awaiting_snooze"] = (uid, expire_ts)
+        await update.message.reply_text(
+            "Which task and when? For example:\n"
+            "_\"Snooze 'call accountant' to next Friday\"_\n"
+            "_\"Remind me about groceries tomorrow\"_",
+            parse_mode="Markdown"
         )
         return
 
@@ -549,6 +676,28 @@ def main():
     jq.run_daily(morning_summary, time=datetime.time(hour=10, minute=30, tzinfo=IST), name="morning_summary")
     jq.run_daily(evening_review,  time=datetime.time(hour=23, minute=0,  tzinfo=IST), name="evening_review")
     log.info("Scheduled: morning summary 10:30 IST, evening review 23:00 IST")
+
+    # Re-register any snoozed tasks that survived a restart
+    now_ts = time.time()
+    snoozed_count = 0
+    for uid_key, udata in data.items():
+        if uid_key == "meta" or not isinstance(udata, dict):
+            continue
+        uid_int = int(uid_key)
+        for t in udata.get("tasks", []):
+            snooze_ts = t.get("snoozed_until")
+            if snooze_ts and snooze_ts > now_ts and not t["done"] and not t["archived"]:
+                remind_dt = datetime.datetime.fromtimestamp(snooze_ts, tz=IST)
+                jq.run_once(
+                    snooze_reminder,
+                    when=remind_dt,
+                    data={"uid": uid_int, "task": t["text"]},
+                    name=f"snooze_{uid_int}_{t['text'][:20]}"
+                )
+                snoozed_count += 1
+                log.info("Re-registered snooze for user %s: '%s' at %s", uid_int, t["text"], remind_dt.isoformat())
+    if snoozed_count:
+        log.info("Re-registered %d snoozed task reminder(s) from tasks.json", snoozed_count)
     log.info("Bot is running. Press Ctrl+C to stop.")
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
