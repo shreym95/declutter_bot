@@ -3,6 +3,7 @@
 
 # Runtime data
 tasks.json
+bot.log
 
 # Python
 __pycache__/

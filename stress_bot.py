@@ -13,6 +13,7 @@ SETUP (one time, ~5 minutes):
 """
 
 import json
+import logging
 import os
 import time
 import datetime
@@ -20,6 +21,20 @@ import pytz
 
 from dotenv import load_dotenv
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.FileHandler("bot.log", encoding="utf-8"),
+        logging.StreamHandler(),
+    ]
+)
+log = logging.getLogger(__name__)
+# Silence the noisy telegram/httpx libraries — only show warnings+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
 
 BOT_TOKEN  = os.getenv("BOT_TOKEN", "")
 GEMINI_KEY = os.getenv("GEMINI_KEY", "")
@@ -226,6 +241,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global PRIMARY_USER_ID
     name = update.effective_user.first_name or "there"
     uid  = update.effective_user.id
+    log.info("User %s (%s) started a session", uid, name)
     reset_chat(uid)
 
     # Persist primary user ID
@@ -331,6 +347,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = button_map.get(text, text)
 
+    log.info("Message from user %s: %.80s", uid, text)
+
     # Show typing indicator
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id, action="typing"
@@ -347,9 +365,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             udata = get_user_data(data, uid)
             upsert_tasks(udata["tasks"], new_tasks)
             save_data(data)
+            log.info("Saved %d new task(s) for user %s", len(new_tasks), uid)
 
     except Exception as e:
-        print(f"Error for user {uid}: {e}")
+        log.exception("Error handling message for user %s", uid)
         await update.message.reply_text(
             "Something went wrong — try again in a moment. "
             "If it keeps happening, tap *Clear & start fresh*.",
@@ -399,7 +418,7 @@ async def _handle_eod_response(update: Update, context: ContextTypes.DEFAULT_TYP
         reply = await ask_gemini(uid, prompt)
         await update.message.reply_text(reply, parse_mode="Markdown")
     except Exception as e:
-        print(f"EOD error for user {uid}: {e}")
+        log.exception("EOD response error for user %s", uid)
         await update.message.reply_text("Great work today! See you tomorrow.")
 
 # ─── SCHEDULED JOBS ──────────────────────────────────────────────────────────
@@ -429,8 +448,9 @@ async def morning_summary(context: ContextTypes.DEFAULT_TYPE):
     try:
         reply = await ask_gemini(uid, prompt)
         await context.bot.send_message(uid, f"☀️ *Morning check-in*\n\n{reply}", parse_mode="Markdown")
+        log.info("Morning summary sent to user %s", uid)
     except Exception as e:
-        print(f"Morning summary error: {e}")
+        log.exception("Morning summary failed for user %s", uid)
 
 async def evening_review(context: ContextTypes.DEFAULT_TYPE):
     uid = PRIMARY_USER_ID
@@ -448,8 +468,9 @@ async def evening_review(context: ContextTypes.DEFAULT_TYPE):
             "_Say 'nothing' if it was one of those days. No judgment._",
             parse_mode="Markdown"
         )
+        log.info("Evening review prompt sent to user %s", uid)
     except Exception as e:
-        print(f"Evening review error: {e}")
+        log.exception("Evening review failed for user %s", uid)
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
@@ -457,16 +478,16 @@ def main():
     global PRIMARY_USER_ID
 
     if not BOT_TOKEN or not GEMINI_KEY:
-        print("\n⚠️  Missing credentials. Create a .env file with:\n")
-        print("  BOT_TOKEN=your_telegram_bot_token")
-        print("  GEMINI_KEY=your_gemini_api_key\n")
+        log.error("Missing credentials — set BOT_TOKEN and GEMINI_KEY in .env")
         return
 
     # Restore primary user ID from disk
     data = load_data()
     PRIMARY_USER_ID = data.get("meta", {}).get("primary_uid")
+    if PRIMARY_USER_ID:
+        log.info("Restored primary_uid=%s from tasks.json", PRIMARY_USER_ID)
 
-    print("🤖 Stress bot is running (Gemini). Press Ctrl+C to stop.")
+    log.info("Bot starting up")
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help",  help_cmd))
@@ -476,7 +497,8 @@ def main():
     jq = app.job_queue
     jq.run_daily(morning_summary, time=datetime.time(hour=10, minute=30, tzinfo=IST), name="morning_summary")
     jq.run_daily(evening_review,  time=datetime.time(hour=23, minute=0,  tzinfo=IST), name="evening_review")
-    print(f"  ⏰ Morning summary: 10:30 AM IST | Evening review: 11:00 PM IST")
+    log.info("Scheduled: morning summary 10:30 IST, evening review 23:00 IST")
+    log.info("Bot is running. Press Ctrl+C to stop.")
 
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
