@@ -41,9 +41,9 @@ GEMINI_KEY = os.getenv("GEMINI_KEY", "")
 
 from google import genai
 from google.genai import types
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes
 )
 
@@ -421,6 +421,34 @@ async def _handle_eod_response(update: Update, context: ContextTypes.DEFAULT_TYP
         log.exception("EOD response error for user %s", uid)
         await update.message.reply_text("Great work today! See you tomorrow.")
 
+async def handle_archive_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle archive button taps from stale task list."""
+    query = update.callback_query
+    await query.answer()
+
+    task_id = query.data.split(":", 1)[1]
+    uid = query.from_user.id
+
+    data = load_data()
+    udata = get_user_data(data, uid)
+    task_name = None
+    for t in udata["tasks"]:
+        if t["id"] == task_id:
+            t["archived"] = True
+            t["done"] = True
+            task_name = t["text"]
+            break
+
+    if task_name:
+        save_data(data)
+        log.info("User %s archived stale task: %s", uid, task_name)
+        await query.edit_message_text(
+            f"🗃 Archived: _{task_name}_\n\nLet it go — you made a call.",
+            parse_mode="Markdown"
+        )
+    else:
+        await query.edit_message_text("Task not found — may have already been archived.")
+
 # ─── SCHEDULED JOBS ──────────────────────────────────────────────────────────
 
 async def morning_summary(context: ContextTypes.DEFAULT_TYPE):
@@ -436,19 +464,41 @@ async def morning_summary(context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(uid, "☀️ Good morning! No pending tasks — enjoy the clear head.")
         return
 
+    stale = get_stale_tasks(udata["tasks"])
     task_text = format_tasks_for_gemini(active)
+    stale_note = ""
+    if stale:
+        stale_names = ", ".join(t["text"] for t in stale[:5])
+        stale_note = f"\n\nAlso flag these tasks as older than 7 days (mention them briefly): {stale_names}"
+
     prompt = (
         f"MORNING SUMMARY MODE.\n"
         f"Current task list:\n{task_text}\n\n"
         f"Give me:\n"
         f"1. Top 3 priorities for today (pick from 🔴 first, then 🟡)\n"
         f"2. One sentence of encouragement\n"
-        f"Keep it under 150 words."
+        f"Keep it under 150 words.{stale_note}"
     )
     try:
         reply = await ask_gemini(uid, prompt)
-        await context.bot.send_message(uid, f"☀️ *Morning check-in*\n\n{reply}", parse_mode="Markdown")
-        log.info("Morning summary sent to user %s", uid)
+
+        if stale:
+            # Send summary first, then stale tasks with archive buttons separately
+            await context.bot.send_message(uid, f"☀️ *Morning check-in*\n\n{reply}", parse_mode="Markdown")
+
+            buttons = [
+                [InlineKeyboardButton(f"🗃 Archive: {t['text'][:40]}", callback_data=f"archive:{t['id']}")]
+                for t in stale[:5]
+            ]
+            await context.bot.send_message(
+                uid,
+                "These tasks have been sitting for 7+ days. Archive the ones you're letting go of:",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+        else:
+            await context.bot.send_message(uid, f"☀️ *Morning check-in*\n\n{reply}", parse_mode="Markdown")
+
+        log.info("Morning summary sent to user %s (%d stale tasks)", uid, len(stale))
     except Exception as e:
         log.exception("Morning summary failed for user %s", uid)
 
@@ -492,6 +542,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help",  help_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CallbackQueryHandler(handle_archive_callback, pattern="^archive:"))
 
     # Scheduled jobs
     jq = app.job_queue
