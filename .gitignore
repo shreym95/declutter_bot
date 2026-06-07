@@ -1,3 +1,6 @@
+# Credentials — never commit
+.env
+
 # Runtime data
 tasks.json
 

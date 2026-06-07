@@ -12,14 +12,16 @@ SETUP (one time, ~5 minutes):
        python stress_bot.py
 """
 
-# ─── YOUR KEYS ────────────────────────────────────────────────────────────────
-BOT_TOKEN   = "YOUR_BOT_TOKEN_HERE"   # from @BotFather on Telegram
-GEMINI_KEY  = "YOUR_GEMINI_KEY_HERE"       # free from aistudio.google.com/apikey
-# ──────────────────────────────────────────────────────────────────────────────
-
 import json
+import os
 import time
 import datetime
+
+from dotenv import load_dotenv
+load_dotenv()
+
+BOT_TOKEN  = os.getenv("BOT_TOKEN", "")
+GEMINI_KEY = os.getenv("GEMINI_KEY", "")
 
 from google import genai
 from google.genai import types
@@ -402,8 +404,10 @@ async def _handle_eod_response(update: Update, context: ContextTypes.DEFAULT_TYP
 def main():
     global PRIMARY_USER_ID
 
-    if "YOUR_" in BOT_TOKEN or "YOUR_" in GEMINI_KEY:
-        print("\n⚠️  Paste your keys at the top of this file first.\n")
+    if not BOT_TOKEN or not GEMINI_KEY:
+        print("\n⚠️  Missing credentials. Create a .env file with:\n")
+        print("  BOT_TOKEN=your_telegram_bot_token")
+        print("  GEMINI_KEY=your_gemini_api_key\n")
         return
 
     # Restore primary user ID from disk
