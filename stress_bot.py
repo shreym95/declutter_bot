@@ -16,6 +16,7 @@ import json
 import os
 import time
 import datetime
+import pytz
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -30,6 +31,8 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes
 )
+
+IST = pytz.timezone("Asia/Kolkata")
 
 # One Gemini client, one chat session per user
 gemini_client = genai.Client(api_key=GEMINI_KEY)
@@ -399,6 +402,55 @@ async def _handle_eod_response(update: Update, context: ContextTypes.DEFAULT_TYP
         print(f"EOD error for user {uid}: {e}")
         await update.message.reply_text("Great work today! See you tomorrow.")
 
+# ─── SCHEDULED JOBS ──────────────────────────────────────────────────────────
+
+async def morning_summary(context: ContextTypes.DEFAULT_TYPE):
+    uid = PRIMARY_USER_ID
+    if uid is None:
+        return
+
+    data = load_data()
+    udata = get_user_data(data, uid)
+    active = get_active_tasks(udata["tasks"])
+
+    if not active:
+        await context.bot.send_message(uid, "☀️ Good morning! No pending tasks — enjoy the clear head.")
+        return
+
+    task_text = format_tasks_for_gemini(active)
+    prompt = (
+        f"MORNING SUMMARY MODE.\n"
+        f"Current task list:\n{task_text}\n\n"
+        f"Give me:\n"
+        f"1. Top 3 priorities for today (pick from 🔴 first, then 🟡)\n"
+        f"2. One sentence of encouragement\n"
+        f"Keep it under 150 words."
+    )
+    try:
+        reply = await ask_gemini(uid, prompt)
+        await context.bot.send_message(uid, f"☀️ *Morning check-in*\n\n{reply}", parse_mode="Markdown")
+    except Exception as e:
+        print(f"Morning summary error: {e}")
+
+async def evening_review(context: ContextTypes.DEFAULT_TYPE):
+    uid = PRIMARY_USER_ID
+    if uid is None:
+        return
+
+    expire_ts = time.time() + 1800  # 30-minute window to respond
+    context.bot_data["awaiting_eod"] = (uid, expire_ts)
+
+    try:
+        await context.bot.send_message(
+            uid,
+            "🌙 *Evening check-in*\n\n"
+            "What did you get done today? Just tell me — one thing or many.\n\n"
+            "_Say 'nothing' if it was one of those days. No judgment._",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        print(f"Evening review error: {e}")
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -419,6 +471,13 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help",  help_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Scheduled jobs
+    jq = app.job_queue
+    jq.run_daily(morning_summary, time=datetime.time(hour=10, minute=30, tzinfo=IST), name="morning_summary")
+    jq.run_daily(evening_review,  time=datetime.time(hour=23, minute=0,  tzinfo=IST), name="evening_review")
+    print(f"  ⏰ Morning summary: 10:30 AM IST | Evening review: 11:00 PM IST")
+
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
