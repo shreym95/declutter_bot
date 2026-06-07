@@ -435,10 +435,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bot_data.pop("awaiting_snooze", None)
 
     # ── Button mappings ─────────────────────────────────────────────────────
+    if text == "📋 Show my task list":
+        data = load_data()
+        udata = get_user_data(data, uid)
+        active = get_active_tasks(udata["tasks"])
+        if not active:
+            await update.message.reply_text("No tasks yet — just send me anything on your mind!")
+        else:
+            priority_label = {"today": "🔴 Do today", "week": "🟡 This week", "whenever": "⚪ Whenever"}
+            groups: dict[str, list] = {"today": [], "week": [], "whenever": []}
+            for t in active:
+                groups.setdefault(t["priority"], []).append(t["text"])
+            lines = []
+            for key, heading in [("today", "🔴 *Do today*"), ("week", "🟡 *This week*"), ("whenever", "⚪ *Whenever*")]:
+                if groups[key]:
+                    lines.append(heading)
+                    lines.extend(f"• {item}" for item in groups[key])
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    if text == "➡️ What should I do now?":
+        data = load_data()
+        udata = get_user_data(data, uid)
+        active = get_active_tasks(udata["tasks"])
+        if not active:
+            await update.message.reply_text("No tasks yet — just send me anything on your mind!")
+            return
+        task_text = format_tasks_for_gemini(active)
+        text = f"Here is my current task list:\n{task_text}\n\nWhat is the single most important thing I should do right now? Pick one."
+
     button_map = {
-        "➡️ What should I do now?": "What is the single most important thing I should do right now? Pick one from my list.",
-        "📋 Show my task list":      "Show me everything on my current list, grouped by priority. Skip archived tasks.",
-        "😮‍💨 I'm overwhelmed":       "I'm feeling really overwhelmed right now. Help me calm down and figure out just one thing to do.",
+        "😮‍💨 I'm overwhelmed": "I'm feeling really overwhelmed right now. Help me calm down and figure out just one thing to do.",
     }
 
     if text == "🗑 Clear & start fresh":
