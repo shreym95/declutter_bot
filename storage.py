@@ -3,6 +3,7 @@ import os
 import time
 from typing import Optional
 
+import metrics
 from config import DATA_FILE
 
 _PRIORITY_LABELS = {
@@ -54,6 +55,7 @@ def make_task(text: str, priority: str = "whenever") -> dict:
     if priority not in VALID_PRIORITIES:
         priority = "whenever"
     ts = int(time.time())
+    metrics.record_task_event("created")
     return {
         "id": f"t_{ts}_{hash(text) % 10000:04d}",
         "text": text,
@@ -135,6 +137,7 @@ def mark_done_by_text(tasks: list, done_text: str) -> int:
         if not t["done"] and t["text"].lower() in done_lower:
             t["done"] = True
             count += 1
+            metrics.record_task_event("done")
     return count
 
 
@@ -144,6 +147,7 @@ def archive_by_id(tasks: list, task_id: str) -> Optional[str]:
         if t["id"] == task_id:
             t["archived"] = True
             t["done"] = True
+            metrics.record_task_event("archived")
             return t["text"]
     return None
 
@@ -152,3 +156,4 @@ def archive_all_active(tasks: list) -> None:
     for t in tasks:
         if not t["done"]:
             t["archived"] = True
+            metrics.record_task_event("archived")

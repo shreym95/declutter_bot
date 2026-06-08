@@ -1,10 +1,12 @@
 import datetime
 import json
 import logging
+import time
 
 from google import genai
 from google.genai import types
 
+import metrics
 import storage
 from config import GEMINI_KEY, GEMINI_MODEL, SYSTEM_PROMPT
 
@@ -33,9 +35,17 @@ def reset_session(uid: int) -> None:
 
 
 async def chat(uid: int, message: str) -> str:
-    session = _get_session(uid)
-    response = session.send_message(message)
-    return response.text
+    t0 = time.perf_counter()
+    error = False
+    try:
+        session = _get_session(uid)
+        response = session.send_message(message)
+        return response.text
+    except Exception:
+        error = True
+        raise
+    finally:
+        metrics.record_gemini_call("chat", (time.perf_counter() - t0) * 1000, error)
 
 
 # ── One-shot calls ─────────────────────────────────────────────────────────────
@@ -59,6 +69,8 @@ async def extract_tasks(user_message: str, gemini_reply: str) -> list[dict]:
         f'[{{"text": "task name", "priority": "today|week|whenever"}}, ...]\n'
         f"If there are no tasks to extract (e.g. the user just chatted), reply with: []"
     )
+    t0 = time.perf_counter()
+    error = False
     try:
         raw = _one_shot(prompt, max_tokens=300)
         items = json.loads(raw)
@@ -74,7 +86,10 @@ async def extract_tasks(user_message: str, gemini_reply: str) -> list[dict]:
         ]
     except Exception:
         log.exception("extract_tasks failed")
+        error = True
         return []
+    finally:
+        metrics.record_gemini_call("extract_tasks", (time.perf_counter() - t0) * 1000, error)
 
 
 async def parse_snooze(text: str) -> dict:
@@ -89,6 +104,8 @@ async def parse_snooze(text: str) -> dict:
         f'If the date or task is unclear, reply: {{"error": "unclear"}}\n'
         f"Interpret relative dates: 'tomorrow', 'next Monday', 'in 3 days', etc."
     )
+    t0 = time.perf_counter()
+    error = False
     try:
         raw = _one_shot(prompt, max_tokens=100)
         result = json.loads(raw)
@@ -98,4 +115,7 @@ async def parse_snooze(text: str) -> dict:
         return result
     except Exception:
         log.exception("parse_snooze failed")
+        error = True
         return {"error": "unclear"}
+    finally:
+        metrics.record_gemini_call("parse_snooze", (time.perf_counter() - t0) * 1000, error)

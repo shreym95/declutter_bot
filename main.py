@@ -15,7 +15,7 @@ from config import (
     setup_logging,
 )
 from handlers.callbacks import handle_archive
-from handlers.commands import start, help_cmd
+from handlers.commands import start, help_cmd, stats_cmd
 from handlers.messages import handle_message
 
 log = setup_logging()
@@ -37,6 +37,7 @@ def main() -> None:
     # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("stats", stats_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_archive, pattern="^archive:"))
 

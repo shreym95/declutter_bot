@@ -6,6 +6,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 import gemini
+import metrics
 import storage
 from config import IST, FLOW_EXPIRY_SECONDS
 from jobs import register_snooze
@@ -96,6 +97,7 @@ async def _on_snooze(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: in
             t["snoozed_until"] = remind_dt.timestamp()
             display_name = t["text"]
             storage.save(data)
+            metrics.record_task_event("snoozed")
             log.info("Task snoozed for user %s until %s: %s", uid, snooze_date, display_name)
             break
     else:
@@ -118,6 +120,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     uid = update.effective_user.id
     text = update.message.text.strip()
     bot_data = context.bot_data
+
+    metrics.record_message()
 
     # Seed primary_uid if the user never ran /start
     if not bot_data.get("primary_uid"):

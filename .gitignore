@@ -3,6 +3,7 @@
 
 # Runtime data
 tasks.json
+metrics.json
 bot.log
 
 # Python
